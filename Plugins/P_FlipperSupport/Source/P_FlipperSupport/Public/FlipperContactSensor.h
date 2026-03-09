@@ -3,24 +3,32 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/NoExportTypes.h"
 #include "FlipperForceSystemTypes.h"
 #include "FlipperContactSensor.generated.h"
 
 class UPrimitiveComponent;
 
 /**
+ * 接触点跨帧历史，用于稳定化过滤
+ * 当本帧命中点与上一帧差距同时超过点位和法线容忍范围时，丢弃本帧
+ */
+struct FFlipperContactHint
+{
+	FVector LastContactPoint = FVector::ZeroVector;
+	FVector LastContactNormal = FVector::UpVector;
+	bool bHasHistory = false;
+};
+
+/**
  * 支撑臂接触探测模块
- * 
- * 职责：
- * - 主动探测四个支撑臂的接触状态
- * - 生成接触片数据（FContactPatchData）
- * - 维护跨帧接触身份、置信度和力历史
- * - 计算接触动力学（速度、切向速度）
- * 
- * 实现要点：
- * - 使用物理查询（Sweep/LineTrace）而非依赖 OnComponentHit 事件
- * - 置信度平滑增减以过滤接触闪烁
- * - 跨帧追踪同一支撑臂的接触历史
+ *
+ * 相比原版的改动：
+ * - 探测方式：LineTrace → ComponentSweepMulti（使用真实物理碰撞形状）
+ * - 扫掠方向：单一 -UpVector → 三方向（-Up、Forward、前下45°）
+ * - ContactMetric：DetectionRadius/Distance 伪量 → 压缩量(cm)
+ * - 接触动力学：基于 RootPrimitive → 基于对应 FlipperPrimitive
+ * - 新增接触点稳定化，过滤帧间接触点跳变噪声
  */
 UCLASS()
 class P_FLIPPERSUPPORT_API UFlipperContactSensor : public UObject
@@ -28,103 +36,71 @@ class P_FLIPPERSUPPORT_API UFlipperContactSensor : public UObject
 	GENERATED_BODY()
 
 public:
-	/**
-	 * 初始化接触传感器
-	 * @param InRootPrimitive 车体主刚体，用于读取速度和角速度
-	 * @param InFlipperPrimitives 四个支撑臂的刚体组件数组
-	 */
-	void Initialize(UPrimitiveComponent* InRootPrimitive, const TArray<UPrimitiveComponent*>& InFlipperPrimitives);
+	void Initialize(UPrimitiveComponent* InRootPrimitive,
+	                const TArray<UPrimitiveComponent*>& InFlipperPrimitives);
 
-	/**
-	 * 每帧探测接触
-	 * @param DeltaTime 帧间隔时间（秒）
-	 * @param OutContactPatches 输出接触片数据数组（4个元素）
-	 */
 	void DetectContacts(float DeltaTime, TArray<FContactPatchData>& OutContactPatches);
 
-	/**
-	 * 设置接触探测半径
-	 * @param Radius 探测半径（cm）
-	 */
+	/** 设置 Sweep 每方向位移（保留旧接口名以兼容调用方） */
 	void SetDetectionRadius(float Radius);
 
-	/**
-	 * 设置接触度量阈值
-	 * @param MinThreshold 最小阈值，低于此值视为无效接触
-	 * @param MaxThreshold 最大阈值，高于此值视为完全接触
-	 */
+	void SetTargetContactGap(float Gap);
+
+	/** MaxThreshold 已废弃，保留参数仅为兼容旧调用 */
 	void SetContactMetricThresholds(float MinThreshold, float MaxThreshold);
 
-	/**
-	 * 设置置信度变化速率
-	 * @param IncreaseRate 增加速率（1/s）
-	 * @param DecreaseRate 减少速率（1/s）
-	 */
 	void SetConfidenceRates(float IncreaseRate, float DecreaseRate);
-
-	/**
-	 * 设置稳定置信度阈值
-	 * @param Threshold 阈值 [0, 1]，置信度超过此值时接触片视为稳定
-	 */
 	void SetStableConfidenceThreshold(float Threshold);
 
 private:
-	/**
-	 * 探测单个支撑臂的接触
-	 * @param FlipperIndex 支撑臂索引
-	 * @param OutHit 输出碰撞结果
-	 * @return 是否检测到有效接触
-	 */
+	/** 多方向 ComponentSweep 探测单个支撑臂 */
 	bool DetectSingleFlipperContact(int32 FlipperIndex, FHitResult& OutHit);
 
-	/**
-	 * 更新接触片的置信度
-	 * @param Patch 接触片数据（输入输出）
-	 * @param bDetected 本帧是否检测到接触
-	 * @param DeltaTime 帧间隔时间（秒）
-	 */
-	void UpdateConfidence(FContactPatchData& Patch, bool bDetected, float DeltaTime);
+	/** 单方向 ComponentSweep 辅助函数 */
+	bool SweepInDirection(UPrimitiveComponent* FlipperPrimitive,
+	                     const FVector& Direction,
+	                     float Distance,
+	                     const FComponentQueryParams& QueryParams,
+	                     FHitResult& OutHit) const;
 
-	/**
-	 * 计算接触动力学
-	 * 计算接触点速度和切向速度分量
-	 * @param Patch 接触片数据（输入输出）
-	 */
+	void UpdateConfidence(FContactPatchData& Patch, bool bDetected, float DeltaTime);
 	void ComputeContactDynamics(FContactPatchData& Patch);
 
+private:
 	// ===== 外部引用 =====
 
-	/** 车体主刚体，用于读取速度和角速度 */
 	UPROPERTY(Transient)
 	TObjectPtr<UPrimitiveComponent> RootPrimitive = nullptr;
 
-	/** 四个支撑臂的刚体组件数组 */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UPrimitiveComponent>> FlipperPrimitives;
 
 	// ===== 历史数据 =====
 
-	/** 上一帧的接触片数据，用于跨帧追踪身份、置信度和力历史 */
 	UPROPERTY(Transient)
 	TArray<FContactPatchData> PreviousPatches;
 
+	/** 每个支撑臂的接触点历史，用于跳变过滤 */
+	TArray<FFlipperContactHint> ContactHints;
+
 	// ===== 配置参数 =====
 
-	/** 接触探测半径（cm） */
-	float DetectionRadius = 50.0f;
+	/** Sweep 每方向位移 (cm) */
+	float DetectionSweepDistance = 8.0f;
+
+	/** 目标接触间隙 (cm)，必须 < DetectionSweepDistance */
+	float TargetContactGap = 3.0f;
 
 	/** 接触度量最小阈值 */
 	float ContactMetricMinThreshold = 0.0f;
 
-	/** 接触度量最大阈值 */
-	float ContactMetricMaxThreshold = 10.0f;
+	/** 接触点最大允许漂移 (cm) */
+	float ContactPointDriftTolerance = 7.0f;
 
-	/** 置信度增加速率（1/s） */
-	float ConfidenceIncreaseRate = 2.0f;
+	/** 法线 dot 下限（~32°） */
+	float ContactNormalDotTolerance = 0.85f;
 
-	/** 置信度减少速率（1/s） */
-	float ConfidenceDecreaseRate = 4.0f;
-
-	/** 稳定置信度阈值 [0, 1] */
-	float StableConfidenceThreshold = 0.7f;
+	float ConfidenceIncreaseRate = 6.0f;
+	float ConfidenceDecreaseRate = 2.0f;
+	float StableConfidenceThreshold = 0.45f;
 };

@@ -116,11 +116,11 @@ struct FContactPatchData
 	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
 	FVector ContactPoint = FVector::ZeroVector;
 
-	/** 接触法线（世界空间，单位矢量，指向远离地面） */
+	/** 接触法线（世界空间，单位矢量，指向远离地面/障碍物表面） */
 	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
 	FVector ContactNormal = FVector::UpVector;
 
-	/** 非负接触强度度量，值越大表示接触参与程度越强；可由穿透深度或接近度换算得到 */
+	/** 接触压缩量（cm），ContactMetric = max(0, TargetContactGap - ActualGap) */
 	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
 	float ContactMetric = 0.0f;
 
@@ -135,6 +135,22 @@ struct FContactPatchData
 	/** 上一帧过滤后的最终力（世界空间，UE 力单位：kg·cm/s²），用于方向平滑和 jerk 限制 */
 	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
 	FVector PreviousForce = FVector::ZeroVector;
+
+	/** 是否已经有过至少一次有效接触（显式布尔，不用零向量兼职状态机） */
+	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
+	bool bHasLastValidContact = false;
+
+	/** 最后一次有效接触的接触点（世界空间，cm） */
+	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
+	FVector LastValidContactPoint = FVector::ZeroVector;
+
+	/** 最后一次有效接触的法线（世界空间，单位矢量） */
+	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
+	FVector LastValidContactNormal = FVector::UpVector;
+
+	/** 距上次有效接触经过的时间（秒） */
+	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
+	float TimeSinceLastValidContact = 999.0f;
 
 	/** 最后更新时间 (秒) */
 	UPROPERTY(BlueprintReadOnly, Category = "Contact Patch")
@@ -170,7 +186,7 @@ struct FCandidateForce
 	UPROPERTY(BlueprintReadOnly, Category = "Candidate Force")
 	FVector TotalForce = FVector::ZeroVector;
 
-	/** 施力点位置（世界空间，cm），即接触点位置 */
+	/** 施力点位置（世界空间，cm） */
 	UPROPERTY(BlueprintReadOnly, Category = "Candidate Force")
 	FVector ApplicationPoint = FVector::ZeroVector;
 
@@ -181,7 +197,7 @@ struct FCandidateForce
 
 /**
  * 安全过滤器输出的最终力
- * 准备施加到车体主刚体
+ * 准备施加到对应支撑臂刚体（若缺失则 fallback 到 RootPrimitive）
  */
 USTRUCT(BlueprintType)
 struct FFinalForce
@@ -196,11 +212,11 @@ struct FFinalForce
 	UPROPERTY(BlueprintReadOnly, Category = "Final Force")
 	FVector Force = FVector::ZeroVector;
 
-	/** 施力点位置（世界空间，cm），即接触点位置 */
+	/** 施力点位置（世界空间，cm） */
 	UPROPERTY(BlueprintReadOnly, Category = "Final Force")
 	FVector ApplicationPoint = FVector::ZeroVector;
 
-	/** 是否应该施加该力到车体主刚体 */
+	/** 是否应该施加该力 */
 	UPROPERTY(BlueprintReadOnly, Category = "Final Force")
 	bool bShouldApply = false;
 };
@@ -217,29 +233,43 @@ struct FForceSystemConfig
 
 	// ===== 接触探测配置 =====
 	
-	/** 接触探测半径 (cm)，用于物理查询的范围 */
+	/**
+	 * ComponentSweep 沿每个方向的位移量 (cm)
+	 * 应 >= TargetContactGap，保证能探测到目标间隙内的接触。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
-	float ContactDetectionRadius = 50.0f;
+	float ContactDetectionRadius = 8.0f;
 
-	/** 接触度量最小阈值，低于此值视为无效接触 */
+	/**
+	 * 目标接触间隙 (cm)
+	 * ContactMetric = max(0, TargetContactGap - ActualGap)
+	 * 建议 < ContactDetectionRadius，让接近过程有一段缓冲区。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
+	float TargetContactGap = 3.0f;
+
+	/** 接触度量最小阈值，低于此值视为无效（通常保持 0，由置信度负责稳定） */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
 	float ContactMetricMinThreshold = 0.0f;
 
-	/** 接触度量最大阈值，高于此值视为完全接触 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
-	float ContactMetricMaxThreshold = 10.0f;
-
 	/** 置信度增加速率 (1/s)，检测到接触时置信度增长速度 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
-	float ConfidenceIncreaseRate = 2.0f;
+	float ConfidenceIncreaseRate = 6.0f;
 
 	/** 置信度减少速率 (1/s)，丢失接触时置信度衰减速度 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
-	float ConfidenceDecreaseRate = 4.0f;
+	float ConfidenceDecreaseRate = 2.0f;
 
 	/** 稳定置信度阈值 [0, 1]，置信度超过此值时接触片视为稳定 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
-	float StableConfidenceThreshold = 0.7f;
+	float StableConfidenceThreshold = 0.45f;
+
+	/**
+	 * 衰减施力时间窗口 (秒)
+	 * EarlyExit 路径中，丢失接触后最多允许继续施加衰减力的时长。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
+	float DecayApplyWindowSeconds = 0.15f;
 
 	// ===== 力大小限制 =====
 	
@@ -257,13 +287,18 @@ struct FForceSystemConfig
 
 	// ===== 支撑力参数 =====
 	
-	/** 支撑力刚度系数（kg/s²），F_support = Stiffness * ContactMetric - Damping * Vn */
+	/**
+	 * 支撑力刚度系数（kg/s²）
+	 * F_support = Stiffness * ContactMetric(cm) - Damping * Vn
+	 * ContactMetric 现为真实压缩量(cm)。
+	 * 满压缩(TargetContactGap=3cm)时出力 ≈ Stiffness * 3。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Support Force")
-	float SupportForceStiffness = 500.0f;
+	float SupportForceStiffness = 1000.0f;
 
 	/** 支撑力阻尼系数（kg/s），用于减少接触切换时的振荡 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Support Force")
-	float SupportForceDamping = 50.0f;
+	float SupportForceDamping = 2000.0f;
 
 	// ===== 防滑力参数 =====
 	
@@ -305,11 +340,11 @@ struct FForceSystemConfig
 
 	/** 最大俯仰扭矩（UE 扭矩单位：kg·cm²/s²），限制所有支撑臂力产生的总俯仰扭矩；初始默认值需按车型和质量重新调参 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraints")
-	float MaxPitchTorque = 10000.0f;
+	float MaxPitchTorque = 500000.0f;
 
 	/** 最大横滚扭矩（UE 扭矩单位：kg·cm²/s²），限制所有支撑臂力产生的总横滚扭矩；初始默认值需按车型和质量重新调参 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraints")
-	float MaxRollTorque = 8000.0f;
+	float MaxRollTorque = 400000.0f;
 
 	// ===== 平滑参数 =====
 	
