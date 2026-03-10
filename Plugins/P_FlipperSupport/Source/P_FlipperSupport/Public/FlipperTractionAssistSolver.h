@@ -55,6 +55,13 @@ public:
 	 */
 	void SetConditionThresholds(float WheelContactThreshold, float YawThreshold, float ThrottleThreshold);
 
+	/**
+	 * 设置越障爬坡辅助参数
+	 * @param UpwardBias 爬坡上向偏置系数 [0, 1]，控制陡峭障碍时的向上力分量权重
+	 * @param MinConfidence 最低置信度阈值 [0, 1]，低于此值不提供牵引辅助
+	 */
+	void SetClimbAssistParams(float UpwardBias, float MinConfidence);
+
 private:
 	/**
 	 * 检查是否满足牵引辅助条件
@@ -80,4 +87,16 @@ private:
 
 	/** 油门输入阈值 [0, 1]，油门输入高于此值时启用牵引辅助 */
 	float ThrottleInputThreshold = 0.1f;
+
+	/**
+	 * 越障爬坡上向偏置系数 [0, 1]
+	 * 0=仅接触平面投影（垂直障碍时力为零），1=垂直障碍时切换为上向力
+	 */
+	float ClimbAssistUpwardBias = 1.0f;
+
+	/**
+	 * 牵引辅助最低置信度阈值 [0, 1]
+	 * 替代 bIsStable 条件，允许 PreStable 阶段提供牵引辅助
+	 */
+	float MinTractionConfidenceThreshold = 0.1f;
 };

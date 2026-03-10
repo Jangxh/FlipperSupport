@@ -328,11 +328,41 @@ struct FForceSystemConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Traction Assist Force")
 	float ThrottleInputThreshold = 0.1f;
 
+	/**
+	 * 越障爬坡上向偏置系数 [0, 1]
+	 * 控制支撑臂接触陡峭障碍时，牵引辅助力方向中向上分量的权重。
+	 * - 0：仅使用接触平面投影（原始行为，垂直障碍时牵引力为零）
+	 * - 1：接触垂直障碍时完全切换为向上方向，平地时保持前向（推荐）
+	 * 物理含义：支撑臂电机克服垂直障碍时产生的抬升力分量
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Traction Assist Force")
+	float ClimbAssistUpwardBias = 1.0f;
+
+	/**
+	 * 牵引辅助最低置信度阈值 [0, 1]
+	 * 接触置信度超过此阈值即可提供牵引辅助，不再强制要求完全稳定（bIsStable）。
+	 * - 低阈值（如 0.1）：接触建立初期即开始施力，适合越障场景
+	 * - 高阈值（如 0.45 = StableConfidenceThreshold）：等价于旧版 bIsStable 要求
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Traction Assist Force")
+	float MinTractionConfidenceThreshold = 0.1f;
+
 	// ===== 约束参数 =====
 	
 	/** 摩擦系数 μ，用于摩擦锥约束 |Ft| <= μ * Fn */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraints")
 	float FrictionCoefficient = 0.8f;
+
+	/**
+	 * 障碍物爬坡摩擦增益 [0, inf]
+	 * 当支撑臂接触陡峭障碍（法线接近水平）时，对摩擦系数的乘法增益。
+	 * 有效摩擦系数 = μ * (1 + ObstacleClimbFrictionMultiplier * 障碍陡峭度)
+	 * - 0：所有接触使用相同摩擦系数
+	 * - 1.5（默认）：垂直障碍时等效 μ = 0.8 * 2.5 = 2.0，允许更大的抬升力
+	 * 物理依据：支撑臂对障碍施加的力由电机扭矩驱动，并非纯接触摩擦，允许超过标准μ
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraints")
+	float ObstacleClimbFrictionMultiplier = 1.5f;
 
 	/** 底盘接触降额因子 [0, 1]，底盘接触时牵引辅助力的缩放比例 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraints")

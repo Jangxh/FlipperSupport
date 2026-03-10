@@ -20,12 +20,26 @@ FVector UFlipperTractionAssistSolver::ComputeForce(const FContactPatchData& Patc
 	// 油门为正时前进，为负时后退
 	const FVector LongitudinalDirection = VehicleState.ForwardVector * FMath::Sign(VehicleState.ThrottleInput);
 
-	// 投影纵向方向到接触平面
-	// 接触平面由接触法线定义，投影公式：V_projected = V - (V · N) * N
 	const FVector& ContactNormal = Patch.ContactNormal;
-	const FVector ProjectedDirection = (LongitudinalDirection - FVector::DotProduct(LongitudinalDirection, ContactNormal) * ContactNormal).GetSafeNormal();
 
-	// 若投影后方向无效（例如纵向方向与法线平行），返回零力
+	// 计算接触面的"地面程度"：法线与世界上方的点积
+	// GroundnessMetric = 1：完全平地（法线朝上）
+	// GroundnessMetric = 0：垂直障碍物（法线水平）
+	const float GroundnessMetric = FMath::Max(0.0f, FVector::DotProduct(ContactNormal, FVector::UpVector));
+
+	// 计算期望运动方向，根据障碍陡峭程度混入向上分量：
+	// - 平地时：UpwardBias = 0，DesiredDirection ≈ ForwardVector → 投影后为前向牵引
+	// - 垂直障碍时：UpwardBias = ClimbAssistUpwardBias，DesiredDirection = (Forward+Up).norm
+	//   → 投影到垂直接触平面后 ≈ UpVector（即向上的抬升力）
+	// 这修复了垂直障碍时纯前向投影 = 零向量的根本缺陷
+	const float UpwardBias = ClimbAssistUpwardBias * (1.0f - GroundnessMetric);
+	const FVector DesiredDirection = (LongitudinalDirection + FVector::UpVector * UpwardBias).GetSafeNormal();
+
+	// 投影期望方向到接触平面
+	// 投影公式：V_projected = V - (V · N) * N
+	const FVector ProjectedDirection = (DesiredDirection - FVector::DotProduct(DesiredDirection, ContactNormal) * ContactNormal).GetSafeNormal();
+
+	// 若投影后方向无效（极端情况），返回零力
 	if (ProjectedDirection.IsNearlyZero())
 	{
 		return FVector::ZeroVector;
@@ -86,9 +100,10 @@ bool UFlipperTractionAssistSolver::ShouldProvideTractionAssist(const FContactPat
 		return false;
 	}
 
-	// 条件 4: 接触片稳定
-	// 只有在接触稳定时才提供牵引辅助，避免在接触不稳定时产生不可预测的力
-	if (!Patch.bIsStable)
+	// 条件 4: 接触置信度高于最低阈值
+	// 使用置信度阈值替代 bIsStable，允许接触建立初期（PreStable 阶段）也提供牵引辅助。
+	// 置信度已通过力大小公式（Confidence 因子）自然调制，因此低置信度时力也较小，不会产生突变。
+	if (Patch.Confidence < MinTractionConfidenceThreshold)
 	{
 		return false;
 	}
@@ -107,6 +122,15 @@ void UFlipperTractionAssistSolver::SetThrottleGain(float Gain)
 {
 	// 设置油门增益，确保为非负值
 	TractionAssistThrottleGain = FMath::Max(0.0f, Gain);
+}
+
+void UFlipperTractionAssistSolver::SetClimbAssistParams(float UpwardBias, float MinConfidence)
+{
+	// 设置越障爬坡偏置系数，限制在 [0, 1] 范围内
+	ClimbAssistUpwardBias = FMath::Clamp(UpwardBias, 0.0f, 1.0f);
+
+	// 设置最低置信度阈值，限制在 [0, 1] 范围内
+	MinTractionConfidenceThreshold = FMath::Clamp(MinConfidence, 0.0f, 1.0f);
 }
 
 void UFlipperTractionAssistSolver::SetConditionThresholds(float WheelContactThreshold, float YawThreshold, float ThrottleThreshold)

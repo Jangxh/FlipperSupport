@@ -47,7 +47,15 @@ void UFlipperForceComposer::ComposeForces(const TArray<FContactPatchData>& Conta
 		CandidateForce.AntiSlipForce = InAntiSlip;
 		CandidateForce.TractionAssistForce = InTraction;
 
-		ApplyFrictionConeConstraint(CandidateForce);
+		// 根据接触面陡峭程度计算有效摩擦系数
+		// GroundnessMetric = 1：平地（法线朝上），使用基础摩擦系数
+		// GroundnessMetric = 0：垂直障碍（法线水平），应用爬坡摩擦增益
+		// 物理依据：支撑臂对垂直障碍施力时，驱动力来自电机扭矩（非纯接触摩擦），允许更高切向力
+		const float GroundnessMetric = FMath::Max(0.0f, FVector::DotProduct(Patch.ContactNormal, FVector::UpVector));
+		const float ObstacleSteepness = 1.0f - GroundnessMetric;
+		const float EffectiveMu = FrictionCoefficient * (1.0f + ObstacleClimbFrictionMultiplier * ObstacleSteepness);
+
+		ApplyFrictionConeConstraint(CandidateForce, EffectiveMu);
 		CandidateForce.bIsValid = true;
 
 		OutCandidateForces.Add(CandidateForce);
@@ -59,12 +67,17 @@ void UFlipperForceComposer::SetFrictionCoefficient(float Mu)
 	FrictionCoefficient = FMath::Max(0.0f, Mu);
 }
 
-void UFlipperForceComposer::ApplyFrictionConeConstraint(FCandidateForce& Force)
+void UFlipperForceComposer::SetObstacleClimbFrictionMultiplier(float Multiplier)
+{
+	ObstacleClimbFrictionMultiplier = FMath::Max(0.0f, Multiplier);
+}
+
+void UFlipperForceComposer::ApplyFrictionConeConstraint(FCandidateForce& Force, float EffectiveMu)
 {
 	const float Fn = Force.SupportForce.Size();
 	FVector Ft = Force.AntiSlipForce + Force.TractionAssistForce;
 	const float FtMag = Ft.Size();
-	const float MaxTangentialForce = FrictionCoefficient * Fn;
+	const float MaxTangentialForce = EffectiveMu * Fn;
 
 	if (FtMag > MaxTangentialForce && FtMag > KINDA_SMALL_NUMBER)
 	{

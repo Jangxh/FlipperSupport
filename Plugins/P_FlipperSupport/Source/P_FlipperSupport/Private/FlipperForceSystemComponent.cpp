@@ -101,8 +101,12 @@ void UFlipperForceSystemComponent::InitializeSubmodules()
 		Config.WheelContactRatioThreshold,
 		Config.YawInputThreshold,
 		Config.ThrottleInputThreshold);
+	TractionAssistSolver->SetClimbAssistParams(
+		Config.ClimbAssistUpwardBias,
+		Config.MinTractionConfidenceThreshold);
 
 	ForceComposer->SetFrictionCoefficient(Config.FrictionCoefficient);
+	ForceComposer->SetObstacleClimbFrictionMultiplier(Config.ObstacleClimbFrictionMultiplier);
 
 	SafetyFilter->Initialize(RootPrimitive);
 	SafetyFilter->SetChassisContactReductionFactor(Config.ChassisContactReductionFactor);
@@ -342,17 +346,22 @@ void UFlipperForceSystemComponent::ExecutePipeline(float DeltaTime)
 	{
 		if (Patch.bIsValid && Patch.bIsStable)
 		{
+			// 完全稳定的接触片：计算全量三类力
 			SupportForces.Add(SupportSolver->ComputeForce(Patch, VehicleState));
 			AntiSlipForces.Add(AntiSlipSolver->ComputeForce(Patch, VehicleState));
 			TractionAssistForces.Add(TractionAssistSolver->ComputeForce(Patch, VehicleState));
 		}
-		else if (Patch.bIsValid && CurrentContactState == EContactState::PreStable)
+		else if (Patch.bIsValid)
 		{
+			// 有效但尚未稳定的接触片（PreStable 阶段或 Stable 整体状态下刚建立的新接触）：
+			// - 支撑力按置信度缩放，防止突变
+			// - 防滑力不施加（接触尚不稳定，切向力可能引起不稳定振荡）
+			// - 牵引辅助力由求解器内部的置信度阈值控制，支持越障场景的早期激活
 			FVector SupportForce = SupportSolver->ComputeForce(Patch, VehicleState);
 			SupportForce *= Patch.Confidence;
 			SupportForces.Add(SupportForce);
 			AntiSlipForces.Add(FVector::ZeroVector);
-			TractionAssistForces.Add(FVector::ZeroVector);
+			TractionAssistForces.Add(TractionAssistSolver->ComputeForce(Patch, VehicleState));
 		}
 		else
 		{

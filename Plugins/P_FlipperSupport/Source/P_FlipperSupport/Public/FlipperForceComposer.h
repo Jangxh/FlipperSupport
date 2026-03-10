@@ -33,8 +33,22 @@ public:
 
 	void SetFrictionCoefficient(float Mu);
 
+	/**
+	 * 设置障碍物爬坡摩擦增益
+	 * @param Multiplier 增益系数 [0, inf]，有效μ = FrictionCoefficient * (1 + Multiplier * 障碍陡峭度)
+	 */
+	void SetObstacleClimbFrictionMultiplier(float Multiplier);
+
 private:
-	void ApplyFrictionConeConstraint(FCandidateForce& Force);
+	/**
+	 * 应用摩擦锥约束，限制切向力不超过 EffectiveMu * 法向力
+	 * @param Force 候选力（原地修改）
+	 * @param EffectiveMu 有效摩擦系数（已根据接触面陡峭程度调整）
+	 */
+	void ApplyFrictionConeConstraint(FCandidateForce& Force, float EffectiveMu);
 
 	float FrictionCoefficient = 0.8f;
+
+	/** 障碍物爬坡摩擦增益，陡峭障碍时提升有效摩擦系数 */
+	float ObstacleClimbFrictionMultiplier = 1.5f;
 };
