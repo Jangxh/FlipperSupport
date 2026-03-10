@@ -84,6 +84,7 @@ void UFlipperForceSystemComponent::InitializeSubmodules()
 	ContactSensor->SetContactMetricThresholds(Config.ContactMetricMinThreshold, 0.0f);
 	ContactSensor->SetConfidenceRates(Config.ConfidenceIncreaseRate, Config.ConfidenceDecreaseRate);
 	ContactSensor->SetStableConfidenceThreshold(Config.StableConfidenceThreshold);
+	ContactSensor->SetContactDriftTolerances(Config.ContactPointDriftTolerance, Config.ContactNormalDotTolerance);
 
 	StateProvider->Initialize(RootPrimitive, TankMovementComponent);
 

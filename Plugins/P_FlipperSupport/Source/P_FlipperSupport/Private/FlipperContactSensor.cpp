@@ -142,6 +142,12 @@ void UFlipperContactSensor::SetStableConfidenceThreshold(float Threshold)
 	StableConfidenceThreshold = FMath::Clamp(Threshold, 0.0f, 1.0f);
 }
 
+void UFlipperContactSensor::SetContactDriftTolerances(float PointDrift, float NormalDot)
+{
+	ContactPointDriftTolerance = FMath::Max(1.0f, PointDrift);
+	ContactNormalDotTolerance = FMath::Clamp(NormalDot, 0.0f, 1.0f);
+}
+
 bool UFlipperContactSensor::SweepInDirection(UPrimitiveComponent* FlipperPrimitive,
                                              const FVector& Direction,
                                              float Distance,

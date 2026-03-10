@@ -52,6 +52,9 @@ public:
 	void SetConfidenceRates(float IncreaseRate, float DecreaseRate);
 	void SetStableConfidenceThreshold(float Threshold);
 
+	/** 设置接触点帧间漂移容差和法线一致性容差 */
+	void SetContactDriftTolerances(float PointDrift, float NormalDot);
+
 private:
 	/** 多方向 ComponentSweep 探测单个支撑臂 */
 	bool DetectSingleFlipperContact(int32 FlipperIndex, FHitResult& OutHit);

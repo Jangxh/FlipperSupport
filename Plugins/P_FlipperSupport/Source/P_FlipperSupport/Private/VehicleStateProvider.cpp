@@ -54,23 +54,18 @@ void UVehicleStateProvider::BuildState(FFlipperVehicleState& OutState)
 	// ===== 从 MovementComponent 读取接触状态 =====
 
 	// 轮地接触比例 [0, 1]
-	// 通过检查车轮状态计算接触比例
-	// UChaosWheeledVehicleMovementComponent 提供 Wheels 数组和 GetNumWheels() 方法
-	// 注意：由于 UE5 Chaos 车辆系统的 API 可能不直接暴露车轮接触状态，
-	// 这里采用保守实现：假设车辆在地面上时接触比例为 1.0，否则为 0.0
-	// 后续可根据实际 API 可用性优化为精确计算
-	const float VehicleSpeed = OutState.LinearVelocity.Size();
-	const bool bVehicleMoving = VehicleSpeed > 1.0f; // 速度大于 1 cm/s 视为运动中
-	OutState.WheelGroundContactRatio = bVehicleMoving ? 1.0f : 0.5f; // 简化实现
+	// UE5.3 Chaos 不提供每轮接触状态的公共 API（WheelStatus/bInContact 为 protected）。
+	// 真实的 TractionAssist 激活闸门由 FlipperContactSensor 的置信度机制保证：
+	// 平地正常行驶时支撑臂无接触 → TractionAssist 不激活；
+	// 越障时支撑臂有接触且置信度 > 阈值 → TractionAssist 激活。
+	// 因此固定返回 0.0f 使 WheelContactRatioThreshold 条件始终满足，不再是约束瓶颈。
+	OutState.WheelGroundContactRatio = 0.0f;
 
 	// 底盘接触状态
-	// 检测底盘底部是否接触地面或障碍物
-	// 通过检查车体垂直速度和位置来推断
-	// 注意：这是简化实现，精确检测需要额外的物理查询或碰撞事件
-	// 如果车体向下速度接近零且位置较低，可能存在底盘接触
-	const float VerticalSpeed = FVector::DotProduct(OutState.LinearVelocity, OutState.UpVector);
-	const bool bLowVerticalSpeed = FMath::Abs(VerticalSpeed) < 10.0f; // 垂直速度小于 10 cm/s
-	OutState.bChassisContact = bLowVerticalSpeed && !bVehicleMoving; // 简化实现
+	// TODO: 正确实现需要从底盘底部向下射线检测
+	// 旧的速度+静止启发式会在车辆卡在障碍物时误触发，导致 ChassisContactReductionFactor
+	// 在最需要牵引辅助力的场景下错误地削减 50% 的力。暂时禁用以避免误触发降额。
+	OutState.bChassisContact = false;
 
 	// ===== 读取车辆物理属性（可选） =====
 

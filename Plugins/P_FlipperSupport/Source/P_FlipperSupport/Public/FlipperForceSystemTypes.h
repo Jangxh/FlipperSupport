@@ -265,6 +265,22 @@ struct FForceSystemConfig
 	float StableConfidenceThreshold = 0.45f;
 
 	/**
+	 * 接触点帧间最大允许漂移 (cm)
+	 * 超过此值且法线变化也超过阈值时，丢弃当帧接触点（防噪声）。
+	 * 楼梯/壕沟边缘场景建议调大至 15~20，默认 7 cm 对边缘接触过于严苛。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
+	float ContactPointDriftTolerance = 15.0f;
+
+	/**
+	 * 接触法线帧间最小 dot 值 [0, 1]
+	 * 低于此值且点位漂移也超过阈值时，丢弃当帧接触点。
+	 * 0.6 ≈ 53° 容忍范围，比原硬编码值 0.85（32°）更宽松，适合边缘接触场景。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Contact Detection")
+	float ContactNormalDotTolerance = 0.6f;
+
+	/**
 	 * 衰减施力时间窗口 (秒)
 	 * EarlyExit 路径中，丢失接触后最多允许继续施加衰减力的时长。
 	 */
