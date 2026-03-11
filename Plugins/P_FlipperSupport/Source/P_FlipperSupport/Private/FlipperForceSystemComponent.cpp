@@ -1,502 +1,273 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
-
+// FlipperForceSystemComponent.cpp
 #include "FlipperForceSystemComponent.h"
-#include "FlipperContactSensor.h"
-#include "VehicleStateProvider.h"
-#include "FlipperSupportSolver.h"
-#include "FlipperAntiSlipSolver.h"
-#include "FlipperTractionAssistSolver.h"
-#include "FlipperForceComposer.h"
-#include "FlipperForceSafetyFilter.h"
-#include "FlipperForceApplicator.h"
-#include "Components/PrimitiveComponent.h"
 #include "DrawDebugHelpers.h"
-#include "C_TankMovementComponent.h"
 
 UFlipperForceSystemComponent::UFlipperForceSystemComponent()
 {
-	PrimaryComponentTick.bCanEverTick = true;
-	bEnableSystem = true;
-	bEnableDebugVisualization = false;
-
-	ContactPatches.SetNum(4);
-	CandidateForces.Reserve(4);
-	FinalForces.Reserve(4);
+    PrimaryComponentTick.bCanEverTick = true;
 }
 
 void UFlipperForceSystemComponent::BeginPlay()
 {
-	Super::BeginPlay();
-
-	ResolveAndCacheComponents();
-	if (!ValidateReferences())
-	{
-		UE_LOG(LogTemp, Error, TEXT("FlipperForceSystem: 引用校验失败，禁用系统"));
-		bEnableSystem = false;
-		return;
-	}
-
-	ContactSensor = NewObject<UFlipperContactSensor>(this);
-	StateProvider = NewObject<UVehicleStateProvider>(this);
-	SupportSolver = NewObject<UFlipperSupportSolver>(this);
-	AntiSlipSolver = NewObject<UFlipperAntiSlipSolver>(this);
-	TractionAssistSolver = NewObject<UFlipperTractionAssistSolver>(this);
-	ForceComposer = NewObject<UFlipperForceComposer>(this);
-	SafetyFilter = NewObject<UFlipperForceSafetyFilter>(this);
-	ForceApplicator = NewObject<UFlipperForceApplicator>(this);
-
-	InitializeSubmodules();
-
-	UE_LOG(LogTemp, Log, TEXT("FlipperForceSystem: 系统初始化成功"));
+    Super::BeginPlay();
+    InitVehicleRefs();
 }
 
+// ─────────────────────────────────────────────────────────────
+//  初始化：找到真正在模拟物理的刚体
+// ─────────────────────────────────────────────────────────────
+void UFlipperForceSystemComponent::InitVehicleRefs()
+{
+    AActor* Owner = GetOwner();
+    if (!Owner) return;
+
+    VehicleMove = Owner->FindComponentByClass<UChaosWheeledVehicleMovementComponent>();
+
+    // 优先使用根组件，但要确认它是真正在模拟物理的PrimitiveComponent
+    UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent());
+    if (Root && Root->IsSimulatingPhysics())
+    {
+        VehicleBody = Root;
+    }
+    else
+    {
+        // 根不行，找第一个正在模拟物理的PrimitiveComponent作为候选
+        TArray<UPrimitiveComponent*> Primitives;
+        Owner->GetComponents<UPrimitiveComponent>(Primitives);
+        for (UPrimitiveComponent* Comp : Primitives)
+        {
+            if (Comp && Comp->IsSimulatingPhysics())
+            {
+                VehicleBody = Comp;
+                break;
+            }
+        }
+    }
+
+    if (!VehicleBody)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("FlipperForceSystemComponent: 未找到模拟物理的VehicleBody，施力将无效。Owner: %s"),
+            *Owner->GetName());
+    }
+
+    if (!VehicleMove)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("FlipperForceSystemComponent: 未找到ChaosWheeledVehicleMovementComponent。Owner: %s"),
+            *Owner->GetName());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Tick
+// ─────────────────────────────────────────────────────────────
 void UFlipperForceSystemComponent::TickComponent(float DeltaTime, ELevelTick TickType,
-                                                 FActorComponentTickFunction* ThisTickFunction)
+    FActorComponentTickFunction* ThisTickFunction)
 {
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+    Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (!bEnableSystem)
-	{
-		return;
-	}
-
-	if (!RootPrimitive || !TankMovementComponent)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("FlipperForceSystem: 运行时关键引用丢失，禁用系统"));
-		bEnableSystem = false;
-		return;
-	}
-
-	ExecutePipeline(DeltaTime);
-
-	if (bEnableDebugVisualization)
-	{
-		DrawDebugVisualization();
-	}
+    if (TrenchState != EFlipperAssistState::Idle)
+    {
+        TickTrench(DeltaTime);
+    }
 }
 
-void UFlipperForceSystemComponent::InitializeSubmodules()
+// ─────────────────────────────────────────────────────────────
+//  越壕沟：接口
+// ─────────────────────────────────────────────────────────────
+void UFlipperForceSystemComponent::BeginTrenchCrossing()
 {
-	ContactSensor->Initialize(RootPrimitive, FlipperPrimitives);
-	ContactSensor->SetDetectionRadius(Config.ContactDetectionRadius);
-	ContactSensor->SetTargetContactGap(Config.TargetContactGap);
-	ContactSensor->SetContactMetricThresholds(Config.ContactMetricMinThreshold, 0.0f);
-	ContactSensor->SetConfidenceRates(Config.ConfidenceIncreaseRate, Config.ConfidenceDecreaseRate);
-	ContactSensor->SetStableConfidenceThreshold(Config.StableConfidenceThreshold);
+    if (TrenchState != EFlipperAssistState::Idle) return;
 
-	StateProvider->Initialize(RootPrimitive, TankMovementComponent);
-
-	SupportSolver->SetMaxForce(Config.MaxSupportForce);
-	SupportSolver->SetStiffness(Config.SupportForceStiffness);
-	SupportSolver->SetDamping(Config.SupportForceDamping);
-
-	AntiSlipSolver->SetMaxForce(Config.MaxAntiSlipForce);
-	AntiSlipSolver->SetGain(Config.AntiSlipForceGain);
-	AntiSlipSolver->SetVelocityDeadband(Config.AntiSlipVelocityDeadband);
-
-	TractionAssistSolver->SetMaxForce(Config.MaxTractionAssistForce);
-	TractionAssistSolver->SetThrottleGain(Config.TractionAssistThrottleGain);
-	TractionAssistSolver->SetConditionThresholds(
-		Config.WheelContactRatioThreshold,
-		Config.YawInputThreshold,
-		Config.ThrottleInputThreshold);
-
-	ForceComposer->SetFrictionCoefficient(Config.FrictionCoefficient);
-
-	SafetyFilter->Initialize(RootPrimitive);
-	SafetyFilter->SetChassisContactReductionFactor(Config.ChassisContactReductionFactor);
-	SafetyFilter->SetMomentLimits(Config.MaxPitchTorque, Config.MaxRollTorque);
-	SafetyFilter->SetSmoothingParameters(Config.ForceDirectionSmoothingRate, Config.ForceJerkLimit);
-	SafetyFilter->SetForceDecayRate(Config.ForceDecayRate);
-
-	ForceApplicator->Initialize(RootPrimitive, FlipperPrimitives);
+    TrenchState         = EFlipperAssistState::RampingIn;
+    TrenchBlendTime     = 0.f;
+    TrenchModeAlpha     = 0.f;
+    TrenchSmoothedDemand = 0.f;
 }
 
-void UFlipperForceSystemComponent::ResolveAndCacheComponents()
+void UFlipperForceSystemComponent::EndTrenchCrossing()
 {
-	AActor* Owner = GetOwner();
-	if (!Owner)
-	{
-		UE_LOG(LogTemp, Error, TEXT("FlipperForceSystem: Owner 为空"));
-		return;
-	}
+    if (TrenchState == EFlipperAssistState::Idle) return;
 
-	if (RootPrimitiveName.IsNone())
-	{
-		RootPrimitive = Cast<UPrimitiveComponent>(Owner->GetRootComponent());
-		if (RootPrimitive)
-		{
-			UE_LOG(LogTemp, Log, TEXT("FlipperForceSystem: 自动使用 RootComponent 作为 RootPrimitive"));
-		}
-	}
-	else
-	{
-		RootPrimitive = FindPrimitiveByName(RootPrimitiveName);
-		if (RootPrimitive)
-		{
-			UE_LOG(LogTemp, Log, TEXT("FlipperForceSystem: 找到 RootPrimitive: %s"), *RootPrimitiveName.ToString());
-		}
-	}
+    // 冻结退出瞬间的快照，RampOut期间不再实时计算
+    TrenchCachedExitModeAlpha  = TrenchModeAlpha;
+    TrenchCachedExitDemand     = TrenchSmoothedDemand;
+    TrenchCachedExitSpeedScale = ComputeSpeedScale();
 
-	if (TankMovementComponentName.IsNone())
-	{
-		TankMovementComponent = Owner->FindComponentByClass<UC_TankMovementComponent>();
-		if (TankMovementComponent)
-		{
-			UE_LOG(LogTemp, Log, TEXT("FlipperForceSystem: 自动找到 TankMovementComponent"));
-		}
-	}
-	else
-	{
-		TArray<UC_TankMovementComponent*> MovementComponents;
-		Owner->GetComponents<UC_TankMovementComponent>(MovementComponents);
-		for (UC_TankMovementComponent* Comp : MovementComponents)
-		{
-			if (Comp && Comp->GetFName() == TankMovementComponentName)
-			{
-				TankMovementComponent = Comp;
-				UE_LOG(LogTemp, Log, TEXT("FlipperForceSystem: 找到 TankMovementComponent: %s"),
-					*TankMovementComponentName.ToString());
-				break;
-			}
-		}
-	}
-
-	FlipperPrimitives.Empty();
-	FlipperPrimitives.SetNum(4);
-	FlipperPrimitives[0] = FindPrimitiveByName(FrontLeftFlipperName);
-	FlipperPrimitives[1] = FindPrimitiveByName(FrontRightFlipperName);
-	FlipperPrimitives[2] = FindPrimitiveByName(RearLeftFlipperName);
-	FlipperPrimitives[3] = FindPrimitiveByName(RearRightFlipperName);
-
-	const TArray<FName> FlipperNames = {
-		FrontLeftFlipperName, FrontRightFlipperName,
-		RearLeftFlipperName, RearRightFlipperName
-	};
-	const TArray<FString> FlipperLabels = {
-		TEXT("前左"), TEXT("前右"), TEXT("后左"), TEXT("后右")
-	};
-
-	for (int32 i = 0; i < 4; ++i)
-	{
-		if (FlipperPrimitives[i])
-		{
-			UE_LOG(LogTemp, Log, TEXT("FlipperForceSystem: 找到%s支撑臂: %s"),
-				*FlipperLabels[i], *FlipperNames[i].ToString());
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("FlipperForceSystem: 未找到%s支撑臂: %s"),
-				*FlipperLabels[i], *FlipperNames[i].ToString());
-		}
-	}
+    TrenchState     = EFlipperAssistState::RampingOut;
+    TrenchBlendTime = 0.f;
+    // ModeAlpha保持当前值，从此处平滑衰减到0（防止End在RampIn中途时跳变）
 }
 
-UPrimitiveComponent* UFlipperForceSystemComponent::FindPrimitiveByName(const FName& CompName) const
+// ─────────────────────────────────────────────────────────────
+//  越壕沟：Tick状态机
+// ─────────────────────────────────────────────────────────────
+void UFlipperForceSystemComponent::TickTrench(float DeltaTime)
 {
-	if (CompName.IsNone())
-	{
-		return nullptr;
-	}
+    // 除零保护
+    const float SafeBlendIn  = FMath::Max(TrenchConfig.BlendInDuration,  KINDA_SMALL_NUMBER);
+    const float SafeBlendOut = FMath::Max(TrenchConfig.BlendOutDuration, KINDA_SMALL_NUMBER);
 
-	AActor* Owner = GetOwner();
-	if (!Owner)
-	{
-		return nullptr;
-	}
+    switch (TrenchState)
+    {
+    // ── RampingIn：时间线性升起，实时读取需求 ──
+    case EFlipperAssistState::RampingIn:
+    {
+        TrenchBlendTime += DeltaTime;
+        TrenchModeAlpha  = FMath::Clamp(TrenchBlendTime / SafeBlendIn, 0.f, 1.f);
 
-	TArray<UPrimitiveComponent*> Primitives;
-	Owner->GetComponents<UPrimitiveComponent>(Primitives);
+        // 平滑需求系数
+        float RawDemand     = ComputeRawDemandScale();
+        TrenchSmoothedDemand = FMath::FInterpTo(TrenchSmoothedDemand, RawDemand,
+                                                DeltaTime, TrenchConfig.DemandInterpSpeed);
 
-	for (UPrimitiveComponent* Comp : Primitives)
-	{
-		if (Comp && Comp->GetFName() == CompName)
-		{
-			return Comp;
-		}
-	}
+        ApplyTrenchForce(TrenchModeAlpha, TrenchSmoothedDemand, ComputeSpeedScale());
 
-	return nullptr;
+        if (TrenchBlendTime >= SafeBlendIn)
+        {
+            TrenchModeAlpha = 1.f;
+            TrenchState     = EFlipperAssistState::Active;
+        }
+        break;
+    }
+
+    // ── Active：ModeAlpha固定1，需求和速度自由变化 ──
+    case EFlipperAssistState::Active:
+    {
+        float RawDemand     = ComputeRawDemandScale();
+        TrenchSmoothedDemand = FMath::FInterpTo(TrenchSmoothedDemand, RawDemand,
+                                                DeltaTime, TrenchConfig.DemandInterpSpeed);
+
+        ApplyTrenchForce(1.f, TrenchSmoothedDemand, ComputeSpeedScale());
+        break;
+    }
+
+    // ── RampingOut：从End快照值线性衰减，需求和速度冻结 ──
+    case EFlipperAssistState::RampingOut:
+    {
+        TrenchBlendTime  += DeltaTime;
+        float OutProgress  = FMath::Clamp(TrenchBlendTime / SafeBlendOut, 0.f, 1.f);
+
+        // 从ExitModeAlpha衰减到0，而不是强制从1开始（防止中途End时的跳变）
+        TrenchModeAlpha = TrenchCachedExitModeAlpha * (1.f - OutProgress);
+
+        // 用冻结的需求和速度，不受实时物理状态干扰
+        ApplyTrenchForce(TrenchModeAlpha,
+                         TrenchCachedExitDemand,
+                         TrenchCachedExitSpeedScale);
+
+        if (TrenchBlendTime >= SafeBlendOut)
+        {
+            TrenchModeAlpha  = 0.f;
+            TrenchState      = EFlipperAssistState::Idle;
+        }
+        break;
+    }
+
+    default: break;
+    }
 }
 
-bool UFlipperForceSystemComponent::ValidateReferences()
+// ─────────────────────────────────────────────────────────────
+//  越壕沟：施力
+// ─────────────────────────────────────────────────────────────
+void UFlipperForceSystemComponent::ApplyTrenchForce(
+    float InModeAlpha, float InDemandScale, float InSpeedScale) const
 {
-	if (!RootPrimitive)
-	{
-		UE_LOG(LogTemp, Error, TEXT("FlipperForceSystem: RootPrimitive 引用无效"));
-		return false;
-	}
+    if (!VehicleBody) return;
 
-	if (!TankMovementComponent)
-	{
-		UE_LOG(LogTemp, Error, TEXT("FlipperForceSystem: TankMovementComponent 引用无效"));
-		return false;
-	}
+    float ThrottleSign = ComputeThrottleSign();
+    if (ThrottleSign < KINDA_SMALL_NUMBER)
+        return;
+    
+    float FinalScale = InModeAlpha * InDemandScale * InSpeedScale;
+    if (FinalScale < KINDA_SMALL_NUMBER) return;
 
-	if (FlipperPrimitives.Num() != 4)
-	{
-		UE_LOG(LogTemp, Error, TEXT("FlipperForceSystem: FlipperPrimitives 数组大小不为 4（当前: %d）"),
-			FlipperPrimitives.Num());
-		return false;
-	}
+    float BaseMagnitude = VehicleBody->GetMass() * TrenchConfig.BaseForcePerMass;
+    FVector Forward     = VehicleBody->GetForwardVector();
+   
+    float  DirSign   = FMath::Sign(ThrottleSign);
+    FVector ForceDir    = (Forward * DirSign + FVector::UpVector * TrenchConfig.LiftRatio).GetSafeNormal();
+    FVector Force       = ForceDir * BaseMagnitude * FinalScale;
 
-	for (int32 i = 0; i < FlipperPrimitives.Num(); ++i)
-	{
-		if (!FlipperPrimitives[i])
-		{
-			UE_LOG(LogTemp, Error, TEXT("FlipperForceSystem: FlipperPrimitives[%d] 引用无效"), i);
-			return false;
-		}
-	}
+    // 硬上限：防止参数叠加异常
+    Force = Force.GetClampedToMaxSize(TrenchConfig.MaxAssistForce);
 
-	return true;
+    VehicleBody->AddForce(Force, NAME_None, false);
+
+#if WITH_EDITOR
+    if (bDrawDebug)
+    {
+        FVector Loc = VehicleBody->GetComponentLocation();
+        DrawDebugDirectionalArrow(GetWorld(),
+            Loc, Loc + ForceDir * FinalScale * 400.f,
+            50.f, FColor::Cyan, false, -1.f, 0, 3.f);
+        DrawDebugString(GetWorld(), Loc + FVector(0.f, 0.f, 120.f),
+            FString::Printf(TEXT("[Trench] Mode:%.2f  Demand:%.2f  Speed:%.2f  Scale:%.2f"),
+                InModeAlpha, InDemandScale, InSpeedScale, FinalScale),
+            nullptr, FColor::White, 0.f);
+    }
+#endif
 }
 
-UFlipperForceSystemComponent::EContactState UFlipperForceSystemComponent::ClassifyContactState() const
+// ─────────────────────────────────────────────────────────────
+//  工具函数
+// ─────────────────────────────────────────────────────────────
+float UFlipperForceSystemComponent::ComputeRawDemandScale() const
 {
-	bool bAnyStable = false;
-	bool bAnyContacts = false;
-
-	for (const FContactPatchData& Patch : ContactPatches)
-	{
-		if (Patch.bIsValid && Patch.bIsStable)
-		{
-			bAnyStable = true;
-			break;
-		}
-
-		if (Patch.bIsValid && Patch.Confidence > Config.StableConfidenceThreshold * 0.33f)
-		{
-			bAnyContacts = true;
-		}
-	}
-
-	if (bAnyStable)
-	{
-		return EContactState::Stable;
-	}
-	if (bAnyContacts)
-	{
-		return EContactState::PreStable;
-	}
-	return EContactState::NoContact;
+    float GroundRatio = ComputeGroundRatio();
+    // 接地比超过阈值 → 需求为0；完全离地 → 需求为1
+    return FMath::Clamp(
+        (TrenchConfig.GroundRatioThreshold - GroundRatio) / 
+         FMath::Max(TrenchConfig.GroundRatioThreshold, KINDA_SMALL_NUMBER),
+        0.f, 1.f
+    );
 }
 
-void UFlipperForceSystemComponent::ExecutePipeline(float DeltaTime)
+float UFlipperForceSystemComponent::ComputeSpeedScale() const
 {
-	ContactSensor->DetectContacts(DeltaTime, ContactPatches);
-	StateProvider->BuildState(VehicleState);
-	CurrentContactState = ClassifyContactState();
+    if (!VehicleBody) return 1.f;
 
-	if (CurrentContactState == EContactState::NoContact)
-	{
-		SafetyFilter->DecayForces(ContactPatches, DeltaTime, FinalForces);
+    FVector Vel        = VehicleBody->GetPhysicsLinearVelocity();
+    float ForwardSpeed = FMath::Abs(
+        FVector::DotProduct(Vel, VehicleBody->GetForwardVector())
+    );
 
-		for (int32 i = 0; i < FinalForces.Num() && i < ContactPatches.Num(); ++i)
-		{
-			FFinalForce& FinalForce = FinalForces[i];
-			const FContactPatchData& Patch = ContactPatches[i];
-
-			const bool bInWindow = Patch.TimeSinceLastValidContact < Config.DecayApplyWindowSeconds;
-			const bool bHasHistory = Patch.bHasLastValidContact;
-			const bool bForceNonTrivial = FinalForce.Force.SizeSquared() > 1.0f;
-
-			if (bInWindow && bHasHistory && bForceNonTrivial)
-			{
-				const FVector& N = Patch.LastValidContactNormal;
-				const float NormalComp = FVector::DotProduct(FinalForce.Force, N);
-
-				FVector ClippedForce = FVector::ZeroVector;
-				if (NormalComp > 0.0f)
-				{
-					ClippedForce = N * NormalComp;
-				}
-
-				if (ClippedForce.SizeSquared() > 1.0f)
-				{
-					FinalForce.Force = ClippedForce;
-					FinalForce.ApplicationPoint = Patch.LastValidContactPoint;
-					FinalForce.bShouldApply = true;
-				}
-			}
-		}
-
-		for (int32 i = 0; i < ContactPatches.Num() && i < FinalForces.Num(); ++i)
-		{
-			ContactPatches[i].PreviousForce = FinalForces[i].Force;
-		}
-
-		ForceApplicator->ApplyForces(FinalForces);
-		return;
-	}
-
-	TArray<FVector> SupportForces;
-	TArray<FVector> AntiSlipForces;
-	TArray<FVector> TractionAssistForces;
-	SupportForces.Reserve(4);
-	AntiSlipForces.Reserve(4);
-	TractionAssistForces.Reserve(4);
-
-	for (const FContactPatchData& Patch : ContactPatches)
-	{
-		if (Patch.bIsValid && Patch.bIsStable)
-		{
-			SupportForces.Add(SupportSolver->ComputeForce(Patch, VehicleState));
-			AntiSlipForces.Add(AntiSlipSolver->ComputeForce(Patch, VehicleState));
-			TractionAssistForces.Add(TractionAssistSolver->ComputeForce(Patch, VehicleState));
-		}
-		else if (Patch.bIsValid && CurrentContactState == EContactState::PreStable)
-		{
-			FVector SupportForce = SupportSolver->ComputeForce(Patch, VehicleState);
-			SupportForce *= Patch.Confidence;
-			SupportForces.Add(SupportForce);
-			AntiSlipForces.Add(FVector::ZeroVector);
-			TractionAssistForces.Add(FVector::ZeroVector);
-		}
-		else
-		{
-			SupportForces.Add(FVector::ZeroVector);
-			AntiSlipForces.Add(FVector::ZeroVector);
-			TractionAssistForces.Add(FVector::ZeroVector);
-		}
-	}
-
-	ForceComposer->ComposeForces(ContactPatches, SupportForces,
-		AntiSlipForces, TractionAssistForces,
-		CandidateForces);
-
-	SafetyFilter->FilterForces(CandidateForces, ContactPatches,
-		VehicleState, DeltaTime, FinalForces);
-
-	for (int32 i = 0; i < ContactPatches.Num() && i < FinalForces.Num(); ++i)
-	{
-		ContactPatches[i].PreviousForce = FinalForces[i].Force;
-	}
-
-	ForceApplicator->ApplyForces(FinalForces);
+    return FMath::GetMappedRangeValueClamped(
+        TrenchConfig.ForwardSpeedRange,
+        TrenchConfig.SpeedScaleRange,
+        ForwardSpeed
+    );
 }
 
-bool UFlipperForceSystemComponent::ShouldEarlyExit()
+float UFlipperForceSystemComponent::ComputeGroundRatio() const
 {
-	return ClassifyContactState() == EContactState::NoContact;
+    if (!VehicleMove) return 1.f;
+
+    int32 Total = VehicleMove->GetNumWheels();
+    if (Total <= 0) return 1.f;
+
+    int32 Grounded = 0;
+    for (int32 i = 0; i < Total; i++)
+    {
+        FWheelStatus WheelStatus = VehicleMove->GetWheelState(i);
+        if (WheelStatus.bInContact)
+        {
+            Grounded++;
+        }
+    }
+    return static_cast<float>(Grounded) / static_cast<float>(Total);
 }
 
-void UFlipperForceSystemComponent::DrawDebugVisualization()
+float UFlipperForceSystemComponent::ComputeThrottleSign() const
 {
-	if (!GetWorld())
-	{
-		return;
-	}
+    if (!VehicleMove) return 0.f;
+    
+    float Throttle = VehicleMove->GetThrottleInput();  // -1~1
 
-	const float ForceScale = 0.01f;
+    // 死区过滤：极小输入视为无输入，不施力
+    if (FMath::Abs(Throttle) < 0.05f) return 0.f;
 
-	for (int32 i = 0; i < ContactPatches.Num(); ++i)
-	{
-		const FContactPatchData& Patch = ContactPatches[i];
-
-		FColor PointColor;
-		if (!Patch.bIsValid)
-		{
-			PointColor = FColor::Red;
-		}
-		else if (Patch.bIsStable)
-		{
-			PointColor = FColor::Green;
-		}
-		else
-		{
-			PointColor = FColor::Yellow;
-		}
-
-		const FVector DebugPoint = Patch.bIsValid ? Patch.ContactPoint : Patch.LastValidContactPoint;
-		DrawDebugSphere(GetWorld(), DebugPoint, 10.0f, 8, PointColor, false, -1.0f, 0, 1.0f);
-
-		if (Patch.bIsValid)
-		{
-			DrawDebugDirectionalArrow(
-				GetWorld(),
-				Patch.ContactPoint,
-				Patch.ContactPoint + Patch.ContactNormal * 50.0f,
-				5.0f,
-				FColor::Blue,
-				false,
-				-1.0f,
-				0,
-				1.5f);
-
-			DrawDebugString(
-				GetWorld(),
-				Patch.ContactPoint + FVector(0, 0, 20),
-				FString::Printf(TEXT("Conf: %.2f"), Patch.Confidence),
-				nullptr,
-				FColor::White,
-				0.0f,
-				true);
-		}
-
-		if (i < CandidateForces.Num() && CandidateForces[i].bIsValid)
-		{
-			const FCandidateForce& Candidate = CandidateForces[i];
-
-			if (!Candidate.SupportForce.IsNearlyZero())
-			{
-				DrawDebugDirectionalArrow(
-					GetWorld(),
-					Candidate.ApplicationPoint,
-					Candidate.ApplicationPoint + Candidate.SupportForce * ForceScale,
-					5.0f,
-					FColor::Green,
-					false,
-					-1.0f,
-					0,
-					1.5f);
-			}
-
-			if (!Candidate.AntiSlipForce.IsNearlyZero())
-			{
-				DrawDebugDirectionalArrow(
-					GetWorld(),
-					Candidate.ApplicationPoint,
-					Candidate.ApplicationPoint + Candidate.AntiSlipForce * ForceScale,
-					5.0f,
-					FColor::Yellow,
-					false,
-					-1.0f,
-					0,
-					1.5f);
-			}
-
-			if (!Candidate.TractionAssistForce.IsNearlyZero())
-			{
-				DrawDebugDirectionalArrow(
-					GetWorld(),
-					Candidate.ApplicationPoint,
-					Candidate.ApplicationPoint + Candidate.TractionAssistForce * ForceScale,
-					5.0f,
-					FColor::Orange,
-					false,
-					-1.0f,
-					0,
-					1.5f);
-			}
-		}
-
-		if (i < FinalForces.Num() && FinalForces[i].bShouldApply)
-		{
-			const FFinalForce& Force = FinalForces[i];
-			if (!Force.Force.IsNearlyZero())
-			{
-				DrawDebugDirectionalArrow(
-					GetWorld(),
-					Force.ApplicationPoint,
-					Force.ApplicationPoint + Force.Force * ForceScale,
-					10.0f,
-					FColor::Red,
-					false,
-					-1.0f,
-					0,
-					2.5f);
-			}
-		}
-	}
+    return FMath::Clamp(Throttle, -1.f, 1.f);
 }
